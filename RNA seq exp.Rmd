@@ -1,0 +1,307 @@
+---
+title: "RNA seq experiment"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+load the required libraries.
+
+```{r ,message=FALSE,warning=F}
+library(DESeq2)
+library( AnnotationDbi )
+library( dplyr ) 
+library(org.Hs.eg.db)
+library(msigdbr)
+library(clusterProfiler)
+library(tidyverse)
+library(ggpubr)
+library( EnhancedVolcano )
+library(pheatmap)
+library(pheatmap)
+library(recount)
+```
+
+load the data that is required for analysis.
+
+```{r ,fig.align='center',message=FALSE,warning=FALSE }
+
+load("ERP010786.rda")
+rownames(se) <- gsub(rownames(se), pattern = "\\..+", replacement = "")  
+count<-assay(se)
+sampleInfo<-as.data.frame(colData( se ) )
+
+```
+
+conduct DESeq on the data and extract the result.
+
+```{r ,fig.align='center',message=FALSE,warning=FALSE}
+dds <- DESeqDataSetFromMatrix( countData = count,colData = sampleInfo,design =~condition )
+
+dds <-DESeq( dds )
+
+res <- results( dds )
+
+results <- as.data.frame(res)
+
+
+```
+
+
+Add the the gene annotation to each of our samples and convert it into a dataframe.
+
+
+```{r ,fig.align='center',message=FALSE,warning=FALSE}
+anno <- AnnotationDbi::select(org.Hs.eg.db, rownames(results),columns=c("ENSEMBL", "ENTREZID", "SYMBOL", "GENENAME"), keytype="ENSEMBL")
+
+results = cbind(ENSEMBL = rownames(results), results)
+
+anno_results <- left_join(as.data.frame(results), anno )
+```
+
+
+plot the volcano plot to view the genes that are differentially expressed between the samples.
+
+```{r ,fig.align='center',message=FALSE,warning=FALSE}
+
+EnhancedVolcano(anno_results, lab = anno_results$SYMBOL,x ='log2FoldChange', y ='padj',xlim =c(-8, 8), title ='Treated vs untreated',pCutoff = 1e-100, FCcutoff = 2, pointSize = 2.0,labSize = 3.0 )
+
+ 
+```
+
+perform regularised transformation on the output of the DEseq data and conduct PCA.
+
+```{r ,fig.align='center',message=FALSE,warning=FALSE}
+rld <- rlog(dds)
+
+plotPCA(rld, intgroup ="condition")
+
+```
+
+extract the significant results.
+
+```{r}
+resultsSig <- anno_results[which(anno_results$padj < 0.01 & abs(anno_results$log2FoldChange) >= 1 & anno_results$baseMean >= 20), ]
+
+```
+
+plot the heatmap with our significant results.
+
+```{r ,fig.align='center',message=FALSE,warning=FALSE}
+mat <- assay(rld)
+annotation<-data.frame("condition"=colData(rld)$condition,row.names = rownames(colData(rld)))
+
+orderedSig <- resultsSig[order(resultsSig$padj), ]
+id1 <- orderedSig$ENSEMBL
+id2 <- orderedSig$SYMBOL
+topDE <- mat[id1,]
+rownames(topDE) <- id2
+top20DE <- head(topDE, n=20)
+
+pheatmap(top20DE, scale = "row", clustering_distance_rows = "correlation", annotation_col = annotation, main="Top 20 Differentially Expressed genes")
+```
+
+GSEA analysis :
+
+conduct the LFC shrink for the result obtained from deseq and annotate the table.
+
+```{r ,fig.align='center',message=FALSE,warning=FALSE}
+resNorm <- lfcShrink(dds = dds, res = res , type = "normal", coef = 2)
+
+
+anno_norm <- AnnotationDbi::select(org.Hs.eg.db, rownames(resNorm), 
+                              columns=c("ENSEMBL", "ENTREZID", "SYMBOL", "GENENAME"), 
+                              keytype="ENSEMBL")
+resNorm = cbind(ENSEMBL = rownames(resNorm), resNorm)
+
+anno_resnorm <- left_join(as.data.frame(resNorm), anno_norm )
+
+resdf <- as.data.frame(anno_resnorm)
+
+```
+
+
+
+Add the score for the GSEA.
+
+```{r}
+resdf2 <- resdf %>%
+  arrange(padj) %>%
+  mutate(gsea_metric = -log10(padj) * sign(log2FoldChange))
+
+resdf2 <- resdf2 %>%
+  mutate(padj = case_when(padj == 0 ~ .Machine$double.xmin,
+                          TRUE ~ padj)) %>%
+  mutate(gsea_metric = -log10(padj) * sign(log2FoldChange))
+
+resdf2 <- resdf2 %>%
+  filter(! is.na(gsea_metric)) %>%
+  arrange(desc(gsea_metric))
+
+```
+
+
+plot the histogram for the GSEA value.
+
+```{r ,fig.align='center',message=FALSE,warning=FALSE}
+hist(resdf2$gsea_metric, breaks = 100)
+
+```
+
+get the ranked vectors and create the gene set.
+
+```{r ,fig.align='center',message=FALSE,warning=FALSE}
+ranks <- resdf2 %>%
+  select(SYMBOL, gsea_metric) %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  deframe()
+
+gene_sets <- msigdbr(species = "Homo sapiens", category = "C5")
+gene_sets <- gene_sets %>%
+  dplyr::select(gs_name, gene_symbol)
+
+```
+
+Run GSEA and plot the pathways.
+
+```{r ,warning=F,fig.align='center',fig.show='hide',message=FALSE,warning=FALSE}
+gseares <- GSEA(geneList = ranks, 
+                TERM2GENE = gene_sets)
+
+dotplot(gseares)
+```
+
+```{r,include=FALSE}
+library(EBImage)
+```
+
+
+```{r,echo=F,fig.align='center',warning=F,message=F}
+
+
+plot1= readImage("Rplot.jpeg")
+
+display(plot1,method="raster")
+
+```
+
+
+
+
+lets plot the top 5 upregulated pathways.
+
+```{r ,warning=F,tidy = TRUE}
+gsearesdf <- as.data.frame(gseares)
+
+top_pathways <- gsearesdf %>%
+  top_n(n = 5, wt = NES) %>%
+  pull(ID)
+
+top_pathway_plots <- lapply(top_pathways, function(pathway) {
+  gseaplot(gseares, geneSetID = pathway, title = pathway)
+})
+
+top_pathway_plot <- ggarrange(plotlist = top_pathway_plots,
+                              ncol = 2, nrow =3, labels = "AUTO")
+
+```
+
+
+
+
+
+
+```{r,echo=F,fig.align='center',warning=F,message=F}
+
+
+plot= readImage("GSEA pathways.png")
+
+display(plot,method="raster")
+
+```
+
+
+It is indicated that cell-cycle arrest promoted by the bacteria -induced DNA damage could increase bacterial colonisation.
+
+The above graph shows the regulation of certain pathways that may lead to DNA damage response in the infected patients.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
