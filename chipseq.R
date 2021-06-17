@@ -72,21 +72,7 @@ genes= lapply(peakAnnoList, function(i) as.data.frame(i)$geneId)
 vennplot(genes)
 
 
-
-
-
-
-
-
-
 #load the chipseq data this way
-
-
-
-
-
-
-#"ENCFF791SNR.bed.gz"
 
 bed_file <- get_demo_file(format = "bed")
 
@@ -96,8 +82,6 @@ new_file<-import(files)
 
 cols <- c("chrom","chrom-start","chrom-end","name","score","strand","signalValue","pValue","qValue","peak")
 colnames(files) <- cols
-
-
 
 covplot(peak, weightCol="V5")
 
